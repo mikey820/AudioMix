@@ -1,0 +1,8 @@
+Package: com.mikey820.audiomix
+Name: AudioMix (Jailed)
+Version: 1.4.0
+Architecture: iphoneos-arm64
+Description: Prevent apps (e.g. Roblox) from pausing your background music — dylib for jailed injection
+Maintainer: mikey820 <mikey820@users.noreply.github.com>
+Author: mikey820
+Section: Tweaks

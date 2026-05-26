@@ -1,53 +1,8 @@
-name: Build
-
-on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Theos
-        run: |
-          export THEOS=${{ github.workspace }}/theos
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          brew install ldid
-          git clone --recursive https://github.com/theos/theos.git $THEOS --depth 1
-          SDK_VER=$(xcrun --sdk iphoneos --show-sdk-version)
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          mkdir -p "$THEOS/sdks"
-          ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS${SDK_VER}.sdk"
-          echo "SDK_VERSION=$SDK_VER" >> $GITHUB_ENV
-          echo "SDK setup complete: iPhoneOS${SDK_VER}.sdk"
-
-      - name: Build all variants
-        run: make clean all
-
       - name: Collect artifacts
         run: |
           mkdir -p artifacts
           cp rootless/packages/*.deb   artifacts/ 2>/dev/null || true
           cp rootful/packages/*.deb    artifacts/ 2>/dev/null || true
-          cp jailed/.theos/obj/AudioMix.dylib artifacts/AudioMix_jailed.dylib 2>/dev/null || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: AudioMix-all
-          path: artifacts/*
-
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          generate_release_notes: true
+          mkdir -p /tmp/jailed-extract
+          dpkg-deb -x jailed/packages/*.deb /tmp/jailed-extract 2>/dev/null || true
+          cp /tmp/jailed-extract/Library/MobileSubstrate/DynamicLibraries/AudioMix.dylib artifacts/AudioMix_jailed.dylib 2>/dev/null || true
