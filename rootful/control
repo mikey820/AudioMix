@@ -1,9 +1,10 @@
 Package: com.mikey820.pleasedontstopthemusic
 Name: PleaseDontStopTheMusic
-Version: 2.0.0
+Version: 2.1.0
 Architecture: iphoneos-arm
 Description: Prevent apps (e.g. Roblox) from pausing your background music
 Maintainer: mikey820 <mikey820@users.noreply.github.com>
 Author: mikey820
 Section: Tweaks
+Icon: icon.png
 Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)

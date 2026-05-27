@@ -17,15 +17,20 @@ An iOS tweak that allows multiple audio sources to play simultaneously by preven
 
 ## How It Works
 
-The tweak intercepts `AVAudioSession` method calls and automatically applies the `AVAudioSessionCategoryOptionMixWithOthers` option to all audio category configurations. This tells iOS to mix incoming audio with existing playback rather than interrupting it.
+The tweak intercepts `AVAudioSession` configuration calls and, **only when another app is already playing audio** (`isOtherAudioPlaying`), applies the `AVAudioSessionCategoryOptionMixWithOthers` option to the incoming app's session. This tells iOS to mix the new audio with existing playback rather than interrupting it.
+
+Crucially, it does **not** force mixing on whichever app is the primary music source. An app that opts into `MixWithOthers` is treated by iOS as a *secondary* source and loses its lock screen / Control Center "Now Playing" transport controls. By leaving the first/primary app untouched, that app keeps full lock-screen skip & pause controls, while later apps (TikTok, games, etc.) are forced to mix in quietly without interrupting it.
 
 ### Hooked Methods
 
 - `setCategory:error:`
 - `setCategory:mode:options:error:`
+- `setCategory:mode:routeSharingPolicy:options:error:` *(the modern API used by TikTok and most current apps)*
 - `setCategory:withOptions:error:`
 - `setActive:error:`
 - `setActive:withOptions:error:`
+
+`SoloAmbient` sessions (which cannot mix) are transparently swapped to `Ambient` when another app is playing, so they no longer silence your music.
 
 ---
 
