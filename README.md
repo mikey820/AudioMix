@@ -46,7 +46,7 @@ Use this method if your device is jailbroken.
 
 1. **Add Repo:** Open https://mikey820.github.io/repo/ and press the button to add it to your perferred package manager/
 2. **Install:** Navigate to the repo on your list to grab it, or search for "PleaseDontStopTheMusic"
-3. **Finalize:** Perform a **respring** of your device to apply the hooks.
+3. **Finalize:** Perform a **respring** of your device to apply the hooks. 
 
 ---
 
