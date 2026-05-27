@@ -49,11 +49,17 @@ Use this method if your device is not jailbroken. You will need to inject the tw
 ### Method 2: Jailbroken
 Use this method if your device is jailbroken.
 
-1. **Add Repo:** Open https://mikey820.github.io/repo/ and press the button to add it to your perferred package manager
+1. **Add Repo:** Open https://repo.chariz.com/ and press the button to add it to your perferred package manager (if its not added by default already, which is should be)
 2. **Install:** Navigate to the repo on your list to grab it, or search for "PleaseDontStopTheMusic"
 3. **Finalize:** Perform a **respring** of your device to apply the hooks. 
 
 ---
+
+### Support the Project
+If you found this tweak useful, consider supporting its development!
+
+[![Donate](https://img.shields.io/badge/Donate-CashApp-00D64B?logo=cashapp)](https://cash.app/$michaelsigma1)
+
 
 If you have any problems or questions, feel free to dm me on discord! dc: fuseegelee
 
