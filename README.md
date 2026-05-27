@@ -2,6 +2,11 @@
 
 An iOS tweak that allows multiple audio sources to play simultaneously by preventing audio session interruptions.
 
+### Support the Project
+If you found this tweak useful, consider supporting its development!
+
+[![Donate](https://img.shields.io/badge/Donate-CashApp-00D64B?logo=cashapp)](https://cash.app/$michaelsigma1)
+
 ---
 
 ## Overview
@@ -54,12 +59,6 @@ Use this method if your device is jailbroken.
 3. **Finalize:** Perform a **respring** of your device to apply the hooks. 
 
 ---
-
-### Support the Project
-If you found this tweak useful, consider supporting its development!
-
-[![Donate](https://img.shields.io/badge/Donate-CashApp-00D64B?logo=cashapp)](https://cash.app/$michaelsigma1)
-
 
 If you have any problems or questions, feel free to dm me on discord! dc: fuseegelee
 
