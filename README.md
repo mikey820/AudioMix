@@ -44,13 +44,10 @@ Use this method if your device is not jailbroken. You will need to inject the tw
 ### Method 2: Jailbroken
 Use this method if your device is jailbroken.
 
-| iOS Version | Architecture |
-| :--- | :--- |
-| **iOS 15+** | `arm64e` |
-| **Below iOS 15** | `arm64` |
+Open https://mikey820.github.io/repo/ and press the button to 
 
-1. **Download:** Obtain the correct package (`.deb`) for your device's architecture.
-2. **Install:** Transfer the file to your device and install it using your preferred package manager (e.g., **Sileo**, **Zebra**, or **Filza**).
+1. **Add Repo:** Open https://mikey820.github.io/repo/ and press the button to add it to your perferred package manager/
+2. **Install:** Navigate to the repo on your list to grab it, or search for "PleaseDontStopTheMusic"
 3. **Finalize:** Perform a **respring** of your device to apply the hooks.
 
 ---
