@@ -8,5 +8,3 @@ Author: mikey820
 Section: Tweaks
 Icon: icon.png
 Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)
-Depiction: https://mikey820.github.io/repo/depiction/com.mikey820.pleasedontstopthemusic.html
-SileoDepiction: https://mikey820.github.io/repo/depiction/com.mikey820.pleasedontstopthemusic.json
