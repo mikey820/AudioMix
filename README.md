@@ -50,6 +50,8 @@ Use this method if your device is jailbroken.
 
 ---
 
+If you have any problems or questions, feel free to dm me on discord! dc: fuseegelee
+
 ## Building
 
 To build all variants of the tweak, run the following command in your terminal:
