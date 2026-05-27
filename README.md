@@ -43,7 +43,7 @@ Use this method if your device is not jailbroken. You will need to inject the tw
 
 1. **Prepare:** Ensure you have the `PleaseDontStopTheMusic.dylib` file.
 2. **Select Tool:** Use a sideloading tool such as **Esign**, **Feather**, or **Sideloadly**.
-3. **Inject:** Import your target application's IPA into the tool, select the `.dylib` for injection, and sign the app.
+3. **Inject:** Import your target application's (the app you want to listen to media on, eg if i want to listen to spotify while playing roblox i would inject it into roblox) IPA into the tool, select the `.dylib` for injection, and sign the app.
 4. **Install:** Install the resulting modified IPA to your device.
 
 ### Method 2: Jailbroken
