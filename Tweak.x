@@ -93,16 +93,48 @@ static BOOL PDSTMIsMixablePlaybackCategory(NSString *category) {
     return %orig(category, options, outError);
 }
 
-// NOTE: we deliberately do NOT hook -setActive:. An earlier version re-applied
-// the category (adding MixWithOthers) from inside -setActive: to catch apps
-// that set their category before any other audio was playing. But re-setting
-// the category triggers an audio route-change notification, which video apps
-// handle by calling -setActive:/-setCategory: again — re-entering this code and
-// looping. Picture-in-Picture is the worst case: AVKit toggles -setActive:
-// rapidly during the PiP transition, so the loop hangs the app (the "TikTok
-// LIVE PiP freeze", issue #3). The setCategory hooks above already apply mixing
-// at configuration time, which is enough for normal playback, so activation is
-// left completely untouched.
+// Some apps configure their category once (when nothing else is playing) and
+// only call -setActive: later. Catch that case at activation time: if other
+// audio is playing and we are about to activate a non-mixing interrupting
+// session, re-apply the category with MixWithOthers so we don't cut it off.
+// This is load-bearing for mixing — without it TikTok interrupts the music.
+- (BOOL)setActive:(BOOL)active error:(NSError **)outError {
+    NSLog(@"[PleaseDontStopTheMusic] setActive:%d cat=%@ mode=%@ opts=%lu otherPlaying=%d",
+          active, self.category, self.mode, (unsigned long)self.categoryOptions,
+          self.isOtherAudioPlaying);
+    if (active && self.isOtherAudioPlaying
+        && PDSTMIsMixablePlaybackCategory(self.category)
+        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        NSString *cat = self.category;
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+            cat = AVAudioSessionCategoryAmbient;
+        }
+        [self setCategory:cat
+                     mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
+                    error:nil];
+    }
+    return %orig;
+}
+
+- (BOOL)setActive:(BOOL)active withOptions:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
+    NSLog(@"[PleaseDontStopTheMusic] setActive:%d withOptions:%lu cat=%@ mode=%@ opts=%lu otherPlaying=%d",
+          active, (unsigned long)options, self.category, self.mode,
+          (unsigned long)self.categoryOptions, self.isOtherAudioPlaying);
+    if (active && self.isOtherAudioPlaying
+        && PDSTMIsMixablePlaybackCategory(self.category)
+        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        NSString *cat = self.category;
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+            cat = AVAudioSessionCategoryAmbient;
+        }
+        [self setCategory:cat
+                     mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
+                    error:nil];
+    }
+    return %orig;
+}
 
 %end
 
