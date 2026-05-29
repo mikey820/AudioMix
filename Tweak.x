@@ -1,43 +1,34 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
-// PleaseDontStopTheMusic  ***TEST BUILD 5***
+// PleaseDontStopTheMusic  ***TEST BUILD 6 (experimental: PiP + bg audio)***
 //
-// Base logic = known-good v2.1.0 (otherPlaying -> force MixWithOthers on the
-// intruder so it joins the music instead of pausing it; leave the primary
-// music app alone so it keeps Now Playing).
+// The freeze only happens when we force the PiP app (TikTok) to MixWithOthers.
+// With TikTok as the PRIMARY audio owner, PiP renders perfectly (that's stock
+// behaviour). The only reason the music stops in that case is that mediaserverd
+// hands the exclusive route to TikTok and interrupts everyone else.
 //
-// THE PiP FIX (test5):
-//   The device logs proved the "frozen PiP video" is NOT caused by our
-//   reconfiguration churn (that happens at app launch, minutes before the
-//   freeze). At the moment PiP freezes, the session is simply
-//   `Playback + MixWithOthers + active`. Full-screen video runs fine in that
-//   exact state, but PiP does not: AVKit's PiP pipeline needs to OWN the audio
-//   route, and a MixWithOthers session is ineligible, so the video stalls while
-//   audio keeps playing.
+// This build attempts the one app-level escape the jailbreak makes possible:
+// the tweak is injected into the MUSIC app too. So when the PiP app enters PiP
+// we let it be primary (PiP works) and, over a Darwin notification, tell the
+// music app's copy of this tweak to keep itself alive as a secondary mixer.
+// If iOS lets a MixWithOthers app keep playing while another app owns the
+// route, you get PiP video AND background music at once.
 //
-//   You cannot have a PiP video AND a mixed (secondary) audio session at the
-//   same time -- that's an AVKit limitation, not something an audio tweak can
-//   override. So: while PiP is active we STOP forcing mix and let the app own
-//   the audio (the stock behaviour PiP is designed for). Result: the PiP video
-//   plays normally; the background music pauses for the duration of PiP and
-//   resumes when PiP ends. Outside of PiP, everything mixes exactly as before.
+// IF the music still pauses, that proves the route arbitration in mediaserverd
+// silences mixers too, and the only remaining path would be a system-daemon
+// patch (separate, risky tweak) -- not something an in-app tweak can do.
 //
-//   We detect PiP by hooking AVPictureInPictureController start/stop. On start
-//   we also proactively drop MixWithOthers from the current session so PiP can
-//   grab the route cleanly.
-//
-// Also completes the options fix: TikTok's `setCategory:Playback withOptions:110`
-// failed because 110 carries PlayAndRecord-only bits (AllowBluetooth 0x4,
-// DefaultToSpeaker 0x8). We now reduce options to the subset valid for a
-// non-record category so the call actually succeeds.
-//
-// Logs: /var/mobile/Documents/PDSTM-<bundleid>.log, else the app's own
-// Documents container (Filza search "PDSTM"). Truncates per app launch.
+// Everything else = known-good v2.1.0 mixing. Logs:
+// /var/mobile/Documents/PDSTM-<bundleid>.log (Filza search "PDSTM").
 
-// Set while Picture-in-Picture is active; suppresses forced mixing so PiP can
-// own the audio route (otherwise the PiP video freezes).
-static BOOL gInPiP = NO;
+#define PDSTM_PIP_START CFSTR("com.mikey820.pdstm.pipstart")
+#define PDSTM_PIP_STOP  CFSTR("com.mikey820.pdstm.pipstop")
+
+static BOOL gInPiP        = NO;  // this process is showing PiP -> stay primary
+static BOOL gIsPiPHost    = NO;  // this process ever hosted PiP (ignore our own broadcast)
+static BOOL gKeepAlive    = NO;  // a PiP host elsewhere asked us to keep playing as a mixer
+static BOOL gMyActive     = NO;  // our session is currently active
 
 // ---------------------------------------------------------------------------
 // Logging (async, never blocks the caller)
@@ -55,7 +46,6 @@ static void PDSTMLogSetup(void) {
         gLogQ = dispatch_queue_create("com.mikey820.pdstm.log", DISPATCH_QUEUE_SERIAL);
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *name = [NSString stringWithFormat:@"PDSTM-%@.log", PDSTMBundle()];
-
         NSString *dir = @"/var/mobile/Documents";
         [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
         NSString *shared = [dir stringByAppendingPathComponent:name];
@@ -75,9 +65,7 @@ static void PDSTMLog(NSString *fmt, ...) {
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-
     NSLog(@"[PDSTM][%@] %@", PDSTMBundle(), msg);
-
     NSString *line = [NSString stringWithFormat:@"%@  %@\n", [NSDate date], msg];
     dispatch_async(gLogQ, ^{
         if (!gLogPath) return;
@@ -92,30 +80,59 @@ static void PDSTMLog(NSString *fmt, ...) {
     });
 }
 
-// Should this app mix right now? Yes if other audio is playing AND we are not
-// in PiP (PiP must own the route).
+// Force mixing while a PiP host wants us alive (gKeepAlive), or when other audio
+// is playing and we're not the one showing PiP.
 static BOOL PDSTMShouldMix(AVAudioSession *session) {
-    return session.isOtherAudioPlaying && !gInPiP;
+    if (gInPiP) return NO;                 // we're the PiP host: own the route
+    if (gKeepAlive) return YES;            // a PiP host elsewhere wants us mixing
+    return session.isOtherAudioPlaying;
 }
 
-// Add MixWithOthers and drop options that are invalid for a non-record category
-// (AllowBluetooth/DefaultToSpeaker/etc. only apply to PlayAndRecord and make the
-// whole setCategory call fail for Playback). For PlayAndRecord we keep the
-// caller's options untouched aside from adding mix.
 static AVAudioSessionCategoryOptions PDSTMMixOptions(NSString *category, AVAudioSessionCategoryOptions options) {
     if ([category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
         return options | AVAudioSessionCategoryOptionMixWithOthers;
     }
-    // Keep only the bits valid for Playback/Ambient/etc, then force mixing.
     AVAudioSessionCategoryOptions keep = options & AVAudioSessionCategoryOptionDuckOthers;
     return keep | AVAudioSessionCategoryOptionMixWithOthers;
 }
 
 // ---------------------------------------------------------------------------
-// PiP detection
+// Cross-app coordination (Darwin notifications)
+// ---------------------------------------------------------------------------
+static void PDSTMForceSelfMix(BOOL on) {
+    AVAudioSession *s = [AVAudioSession sharedInstance];
+    NSString *cat = s.category;
+    if (![cat isEqualToString:AVAudioSessionCategoryPlayback]
+        && ![cat isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        return; // not an audio-producing session; nothing to keep alive
+    }
+    AVAudioSessionCategoryOptions opts = s.categoryOptions;
+    if (on) opts |= AVAudioSessionCategoryOptionMixWithOthers;
+    else    opts &= ~AVAudioSessionCategoryOptionMixWithOthers;
+    [s setCategory:cat mode:s.mode options:opts error:nil];
+    if (gMyActive) [s setActive:YES error:nil];
+    PDSTMLog(@"keep-alive %@: re-applied %@ opts=%lu (active=%d)",
+             on ? @"ON" : @"OFF", cat, (unsigned long)opts, gMyActive);
+}
+
+static void PDSTMOnPiPStart(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef d) {
+    if (gIsPiPHost) return;       // don't react to our own broadcast
+    gKeepAlive = YES;
+    PDSTMLog(@"<- PiP started in another app: forcing self to mix to survive");
+    PDSTMForceSelfMix(YES);
+}
+
+static void PDSTMOnPiPStop(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef d) {
+    if (gIsPiPHost) return;
+    gKeepAlive = NO;
+    PDSTMLog(@"<- PiP stopped elsewhere: restoring normal (primary) session");
+    PDSTMForceSelfMix(NO);
+}
+
+// ---------------------------------------------------------------------------
+// PiP detection (installed lazily; AVKit loads on demand)
 // ---------------------------------------------------------------------------
 @interface AVPictureInPictureController : NSObject
-@property (nonatomic, readonly, getter=isPictureInPictureActive) BOOL pictureInPictureActive;
 - (void)startPictureInPicture;
 - (void)stopPictureInPicture;
 @end
@@ -125,31 +142,31 @@ static AVAudioSessionCategoryOptions PDSTMMixOptions(NSString *category, AVAudio
 
 - (void)startPictureInPicture {
     gInPiP = YES;
-    // Proactively hand the audio route back so PiP can render. Removing mix
-    // from the active session lets PiP own playback (background music pauses).
+    gIsPiPHost = YES;
+    // Tell the music app to keep playing as a mixer BEFORE we grab the route.
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         PDSTM_PIP_START, NULL, NULL, YES);
+    // Give up MixWithOthers ourselves so PiP can own the route and render.
     AVAudioSession *s = [AVAudioSession sharedInstance];
     if (s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers) {
-        [s setCategory:s.category
-                  mode:s.mode
-               options:(s.categoryOptions & ~AVAudioSessionCategoryOptionMixWithOthers)
-                 error:nil];
+        [s setCategory:s.category mode:s.mode
+               options:(s.categoryOptions & ~AVAudioSessionCategoryOptionMixWithOthers) error:nil];
     }
-    PDSTMLog(@"PiP START -> gInPiP=YES, dropped MixWithOthers so video can play");
+    PDSTMLog(@"PiP START (host) -> primary route, broadcast pipstart");
     %orig;
 }
 
 - (void)stopPictureInPicture {
     gInPiP = NO;
-    PDSTMLog(@"PiP STOP -> gInPiP=NO, mixing re-enabled");
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         PDSTM_PIP_STOP, NULL, NULL, YES);
+    PDSTMLog(@"PiP STOP (host) -> broadcast pipstop");
     %orig;
 }
 
 %end
 %end
 
-// AVKit (and AVPictureInPictureController) is often loaded lazily, after our
-// %ctor. Install the PiP hooks as soon as the class exists; safe to call from
-// anywhere thanks to dispatch_once.
 static void PDSTMEnsurePiPHooks(void) {
     static dispatch_once_t once;
     if (objc_getClass("AVPictureInPictureController")) {
@@ -167,52 +184,44 @@ static void PDSTMEnsurePiPHooks(void) {
 
 - (BOOL)setCategory:(NSString *)category error:(NSError **)outError {
     PDSTMEnsurePiPHooks();
-    PDSTMLog(@"setCategory:%@  (otherPlaying=%d inPiP=%d)", category, self.isOtherAudioPlaying, gInPiP);
+    PDSTMLog(@"setCategory:%@  (other=%d inPiP=%d keepAlive=%d)", category, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (PDSTMShouldMix(self)) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             return %orig(AVAudioSessionCategoryAmbient, outError);
         }
         if ([category isEqualToString:AVAudioSessionCategoryPlayback]) {
-            return [self setCategory:category
-                                mode:AVAudioSessionModeDefault
-                             options:AVAudioSessionCategoryOptionMixWithOthers
-                               error:outError];
+            return [self setCategory:category mode:AVAudioSessionModeDefault
+                             options:AVAudioSessionCategoryOptionMixWithOthers error:outError];
         }
     }
     return %orig;
 }
 
 - (BOOL)setCategory:(NSString *)category mode:(NSString *)mode options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    PDSTMLog(@"setCategory:%@ mode:%@ options:%lu  (otherPlaying=%d inPiP=%d)",
-             category, mode, (unsigned long)options, self.isOtherAudioPlaying, gInPiP);
+    PDSTMLog(@"setCategory:%@ mode:%@ options:%lu  (other=%d inPiP=%d keepAlive=%d)",
+             category, mode, (unsigned long)options, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (PDSTMShouldMix(self)) {
-        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            category = AVAudioSessionCategoryAmbient;
-        }
+        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) category = AVAudioSessionCategoryAmbient;
         options = PDSTMMixOptions(category, options);
     }
     return %orig(category, mode, options, outError);
 }
 
 - (BOOL)setCategory:(NSString *)category mode:(NSString *)mode routeSharingPolicy:(AVAudioSessionRouteSharingPolicy)policy options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    PDSTMLog(@"setCategory:%@ mode:%@ policy:%ld options:%lu  (otherPlaying=%d inPiP=%d)",
-             category, mode, (long)policy, (unsigned long)options, self.isOtherAudioPlaying, gInPiP);
+    PDSTMLog(@"setCategory:%@ mode:%@ policy:%ld options:%lu  (other=%d inPiP=%d keepAlive=%d)",
+             category, mode, (long)policy, (unsigned long)options, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (PDSTMShouldMix(self)) {
-        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            category = AVAudioSessionCategoryAmbient;
-        }
+        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) category = AVAudioSessionCategoryAmbient;
         options = PDSTMMixOptions(category, options);
     }
     return %orig(category, mode, policy, options, outError);
 }
 
 - (BOOL)setCategory:(NSString *)category withOptions:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    PDSTMLog(@"setCategory:%@ withOptions:%lu  (otherPlaying=%d inPiP=%d)",
-             category, (unsigned long)options, self.isOtherAudioPlaying, gInPiP);
+    PDSTMLog(@"setCategory:%@ withOptions:%lu  (other=%d inPiP=%d keepAlive=%d)",
+             category, (unsigned long)options, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (PDSTMShouldMix(self)) {
-        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            category = AVAudioSessionCategoryAmbient;
-        }
+        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) category = AVAudioSessionCategoryAmbient;
         options = PDSTMMixOptions(category, options);
     }
     return %orig(category, options, outError);
@@ -220,35 +229,29 @@ static void PDSTMEnsurePiPHooks(void) {
 
 - (BOOL)setActive:(BOOL)active error:(NSError **)outError {
     PDSTMEnsurePiPHooks();
-    PDSTMLog(@"setActive:%d  (cat=%@ opts=%lu otherPlaying=%d inPiP=%d)",
-             active, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gInPiP);
+    gMyActive = active;
+    PDSTMLog(@"setActive:%d  (cat=%@ opts=%lu other=%d inPiP=%d keepAlive=%d)",
+             active, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (active && PDSTMShouldMix(self)
         && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
         NSString *cat = self.category;
-        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            cat = AVAudioSessionCategoryAmbient;
-        }
-        [self setCategory:cat
-                     mode:self.mode
-                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
-                    error:nil];
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) cat = AVAudioSessionCategoryAmbient;
+        [self setCategory:cat mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers error:nil];
     }
     return %orig;
 }
 
 - (BOOL)setActive:(BOOL)active withOptions:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
-    PDSTMLog(@"setActive:%d withOptions:%lu  (cat=%@ opts=%lu otherPlaying=%d inPiP=%d)",
-             active, (unsigned long)options, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gInPiP);
+    gMyActive = active;
+    PDSTMLog(@"setActive:%d withOptions:%lu  (cat=%@ opts=%lu other=%d inPiP=%d keepAlive=%d)",
+             active, (unsigned long)options, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gInPiP, gKeepAlive);
     if (active && PDSTMShouldMix(self)
         && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
         NSString *cat = self.category;
-        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            cat = AVAudioSessionCategoryAmbient;
-        }
-        [self setCategory:cat
-                     mode:self.mode
-                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
-                    error:nil];
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) cat = AVAudioSessionCategoryAmbient;
+        [self setCategory:cat mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers error:nil];
     }
     return %orig;
 }
@@ -256,8 +259,11 @@ static void PDSTMEnsurePiPHooks(void) {
 %end
 
 %ctor {
-    %init; // initialize the ungrouped AVAudioSession hooks
+    %init; // ungrouped AVAudioSession hooks
     PDSTMLogSetup();
     PDSTMEnsurePiPHooks();
-    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 5 loaded in %@", PDSTMBundle());
+    CFNotificationCenterRef dn = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(dn, NULL, PDSTMOnPiPStart, PDSTM_PIP_START, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(dn, NULL, PDSTMOnPiPStop,  PDSTM_PIP_STOP,  NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 6 loaded in %@", PDSTMBundle());
 }
