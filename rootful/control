@@ -1,6 +1,6 @@
 Package: com.mikey820.pleasedontstopthemusic
 Name: PleaseDontStopTheMusic (TEST BUILD)
-Version: 2.2.0~test2
+Version: 2.2.0~test3
 Architecture: iphoneos-arm
 Description: [TEST BUILD - DO NOT REDISTRIBUTE] Prevent apps (e.g. Roblox) from pausing your background music. Diagnostic build for fixing Twitter/YouTube/TikTok PiP audio bugs.
 Maintainer: mikey820 <mikey820@users.noreply.github.com>
