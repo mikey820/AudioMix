@@ -1,22 +1,30 @@
 #import <AVFoundation/AVFoundation.h>
 
-// PleaseDontStopTheMusic  ***TEST BUILD 3 (diagnostic)***
+// PleaseDontStopTheMusic  ***TEST BUILD 4***
 //
-// IMPORTANT: the audio-mixing logic below is reverted to be IDENTICAL to the
-// shipped, known-good v2.1.0. test1/test2 added a "latch" experiment that broke
-// the normal "Spotify playing -> open TikTok -> mixes" case, so it is gone.
-// The ONLY thing this build adds over v2.1.0 is logging, and that logging is
-// done asynchronously on a background queue so it cannot disturb the timing of
-// an app's audio-session setup.
+// Base logic = known-good v2.1.0 (otherPlaying -> force MixWithOthers on the
+// intruder; leave the primary music app alone so it keeps Now Playing). The
+// "latch" experiment from test1/test2 is gone for good.
 //
-// Goal (unchanged): let a second app play audio WITHOUT pausing music that is
-// already playing, while leaving the music app in control of the lock-screen
-// "Now Playing" transport. Heuristic: if other audio is already playing when an
-// app configures its session, force MixWithOthers on that app (the intruder);
-// otherwise leave it alone (so the music app keeps its Now Playing controls).
+// test4 change, driven by the device logs:
+//   TikTok calls `setCategory:Playback withOptions:110`. 110 includes
+//   DefaultToSpeaker (0x8), which is ONLY valid for PlayAndRecord. With
+//   Playback the call fails and applies nothing, so the session stayed at
+//   opts=0 and only our setActive: re-assertion got mixing going. That extra
+//   reconfiguration churn happens right in the middle of the PiP activation
+//   handshake and is the most likely cause of the FROZEN PiP video (audio
+//   keeps playing fine; only the video stalls -> classic symptom of AVKit's
+//   PiP layer reacting to an audio-session interruption/route change).
 //
-// Logs are written to /var/mobile/Documents/PDSTM-<bundleid>.log (browsable in
-// Filza). Reproduce a bug, then send that file.
+//   Fix: when we force mixing, also strip the invalid DefaultToSpeaker bit for
+//   non-PlayAndRecord categories. Now TikTok's OWN setCategory succeeds with
+//   MixWithOthers, the session settles before activation, and our setActive:
+//   re-assertion no longer needs to fire during PiP. If the PiP video still
+//   freezes after this, the freeze is intrinsic to MixWithOthers+PiP (an AVKit
+//   limitation an audio tweak can't fix) rather than our churn.
+//
+// Logs: /var/mobile/Documents/PDSTM-<bundleid>.log, else the app's own
+// Documents container (Filza search "PDSTM"). Truncates per app launch.
 
 // ---------------------------------------------------------------------------
 // Logging (async, never blocks the caller)
@@ -75,8 +83,20 @@ static void PDSTMLog(NSString *fmt, ...) {
     });
 }
 
+// Add MixWithOthers and drop options that are invalid for the given category
+// (DefaultToSpeaker only applies to PlayAndRecord; leaving it on Playback makes
+// the whole setCategory call fail). Logs when it actually strips something.
+static AVAudioSessionCategoryOptions PDSTMMixOptions(NSString *category, AVAudioSessionCategoryOptions options) {
+    options |= AVAudioSessionCategoryOptionMixWithOthers;
+    if (![category isEqualToString:AVAudioSessionCategoryPlayAndRecord]
+        && (options & AVAudioSessionCategoryOptionDefaultToSpeaker)) {
+        options &= ~AVAudioSessionCategoryOptionDefaultToSpeaker;
+    }
+    return options;
+}
+
 // ---------------------------------------------------------------------------
-// Hooks — logic identical to v2.1.0, with logging added.
+// Hooks — base logic from v2.1.0, plus the DefaultToSpeaker fix and logging.
 // ---------------------------------------------------------------------------
 %hook AVAudioSession
 
@@ -103,7 +123,7 @@ static void PDSTMLog(NSString *fmt, ...) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
         }
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        options = PDSTMMixOptions(category, options);
     }
     return %orig(category, mode, options, outError);
 }
@@ -115,7 +135,7 @@ static void PDSTMLog(NSString *fmt, ...) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
         }
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        options = PDSTMMixOptions(category, options);
     }
     return %orig(category, mode, policy, options, outError);
 }
@@ -127,7 +147,7 @@ static void PDSTMLog(NSString *fmt, ...) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
         }
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        options = PDSTMMixOptions(category, options);
     }
     return %orig(category, options, outError);
 }
@@ -170,5 +190,5 @@ static void PDSTMLog(NSString *fmt, ...) {
 
 %ctor {
     PDSTMLogSetup();
-    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 3 loaded in %@", PDSTMBundle());
+    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 4 loaded in %@", PDSTMBundle());
 }
