@@ -43,23 +43,19 @@ Use this method if your device is not jailbroken. You will need to inject the tw
 
 1. **Prepare:** Ensure you have the `PleaseDontStopTheMusic.dylib` file.
 2. **Select Tool:** Use a sideloading tool such as **Esign**, **Feather**, or **Sideloadly**.
-3. **Inject:** Import your target application's IPA into the tool, select the `.dylib` for injection, and sign the app.
+3. **Inject:** Import your target application's (the app you want to listen to media on, eg if i want to listen to spotify while playing roblox i would inject it into roblox) IPA into the tool, select the `.dylib` for injection, and sign the app.
 4. **Install:** Install the resulting modified IPA to your device.
 
 ### Method 2: Jailbroken
 Use this method if your device is jailbroken.
 
-1. **Add Repo:** Open https://mikey820.github.io/repo/ and press the button to add it to your perferred package manager
+1. **Add Repo:** Open  https://mikey820.github.io/repo/ and press the button to add it to your perferred package manager
 2. **Install:** Navigate to the repo on your list to grab it, or search for "PleaseDontStopTheMusic"
 3. **Finalize:** Perform a **respring** of your device to apply the hooks. 
 
 ---
 
 If you have any problems or questions, feel free to dm me on discord! dc: fuseegelee
-
-## Building
-
-To build all variants of the tweak, run the following command in your terminal:
 
 ```bash
 make all
