@@ -256,6 +256,7 @@ static void PDSTMEnsurePiPHooks(void) {
 %end
 
 %ctor {
+    %init; // initialize the ungrouped AVAudioSession hooks
     PDSTMLogSetup();
     PDSTMEnsurePiPHooks();
     NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 5 loaded in %@", PDSTMBundle());
