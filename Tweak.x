@@ -1,6 +1,6 @@
 #import <AVFoundation/AVFoundation.h>
 
-// PleaseDontStopTheMusic  ***TEST BUILD***
+// PleaseDontStopTheMusic  ***TEST BUILD 2***
 //
 // Goal: let a second app (TikTok, Twitter, YouTube, a game, ...) play audio
 // WITHOUT pausing the music that is already playing, while leaving that music
@@ -9,50 +9,91 @@
 //
 // An audio session that opts into MixWithOthers is treated by iOS as a
 // *secondary* source: it won't interrupt others, and it gives up the Now
-// Playing controls. So we must only force mixing on the "intruder" app, never
-// on the primary music app (or its lock-screen controls vanish).
+// Playing controls. So we only force mixing on the "intruder" app, never on the
+// primary music app (or its lock-screen controls vanish).
 //
-// -------- What changed in this test build (vs the shipped 2.1.x) --------
-//
-// 1. LATCHED secondary detection.  We used to re-check -isOtherAudioPlaying on
-//    every single setCategory:/setActive: call. The problem: entering or
-//    leaving Picture-in-Picture briefly tears the session down, during which
-//    -isOtherAudioPlaying flickers to NO. The intruder then reconfigured
-//    itself as an exclusive/interrupting session and killed the background
-//    music. This is the most likely cause of:
-//        * "Spotify stops on Twitter / YouTube videos"
-//        * "enabling PiP stops the background music"
-//    Fix: once a process has been seen acting as a secondary source (other
-//    audio was playing when it configured its session) we LATCH that decision
-//    and keep forcing MixWithOthers, so a transient flicker can't undo it.
-//
-// 2. NO re-entrant reconfigure inside setActive:.  The old code called
-//    -setCategory:mode:options: synchronously from within -setActive:. During
-//    PiP this reconfigures the session in the middle of AVPictureInPicture's
-//    own activation handshake and is the prime suspect for the "TikTok PiP
-//    window freezes" report. We now apply mixing only from the setCategory:*
-//    family (which the latch makes reliable) and leave setActive: to log only.
-//
-// 3. Diagnostic logging (this is a TEST build). Every relevant call prints the
-//    bundle id, category, mode and options so we can confirm on-device exactly
-//    what each app does. Grep device console for "[PDSTM]".
+// -------- test2 changelog --------
+//   * RESTORED the setActive: re-assertion that test1 wrongly removed. That
+//     hook is what makes normal "Spotify -> TikTok" mixing work: TikTok sets
+//     its category before its audio is up, and we re-apply MixWithOthers when
+//     it actually activates (when other audio is reliably detected). Removing
+//     it in test1 broke that case.
+//   * Kept the LATCH: once this process has been seen as a secondary source we
+//     remember it, so a transient -isOtherAudioPlaying flicker during a PiP
+//     teardown can't make the app re-grab exclusive playback and kill the music.
+//   * NEW: writes a log file to a Filza-accessible path (see PDSTMLog) so the
+//     PiP-freeze behaviour can be diagnosed on-device without a computer.
 
-// Process-global: AVAudioSession is effectively a per-process singleton, so a
-// static flag is the right scope. Once YES it stays YES for this app's life.
+// AVAudioSession is effectively a per-process singleton, so a static flag is
+// the right scope. Once YES it stays YES for this app's life.
 static BOOL gLatchedSecondary = NO;
 
 static NSString *PDSTMBundle(void) {
-    return [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+    return [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
 }
 
-// Returns whether this process should mix. Latches the decision the first time
-// other audio is observed playing while this app configures its session.
-static BOOL PDSTMShouldMix(AVAudioSession *session) {
-    if (session.isOtherAudioPlaying) {
-        if (!gLatchedSecondary) {
-            gLatchedSecondary = YES;
-            NSLog(@"[PDSTM][%@] latched as SECONDARY source -> will mix from now on", PDSTMBundle());
+// ---- File logging (Filza-accessible) ---------------------------------------
+// We try a few shared locations first (browsable straight from Filza's root);
+// if the app sandbox blocks them we fall back to the app's own Documents dir,
+// which Filza lists by app name under
+//   /var/mobile/Containers/Data/Application/<UUID>/Documents/
+static NSString *gLogPath = nil;
+
+static void PDSTMResolveLogPath(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *name = [NSString stringWithFormat:@"PDSTM-%@.log", PDSTMBundle()];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        // Preferred shared spots, most-accessible first.
+        NSArray<NSString *> *dirs = @[ @"/var/mobile/Documents",
+                                       @"/var/mobile/Library/Logs",
+                                       @"/var/mobile" ];
+        for (NSString *dir in dirs) {
+            NSString *p = [dir stringByAppendingPathComponent:name];
+            // createFileAtPath returns NO if the sandbox denies the write.
+            if ([fm createFileAtPath:p contents:[NSData data] attributes:nil]) {
+                gLogPath = p;
+                break;
+            }
         }
+        if (!gLogPath) {
+            // Always-writable fallback: the app's own sandbox Documents dir.
+            NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            gLogPath = [docs stringByAppendingPathComponent:name];
+            [fm createFileAtPath:gLogPath contents:[NSData data] attributes:nil];
+        }
+        NSLog(@"[PDSTM][%@] log file: %@", PDSTMBundle(), gLogPath);
+    });
+}
+
+static void PDSTMLog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSLog(@"[PDSTM][%@] %@", PDSTMBundle(), msg);
+
+    PDSTMResolveLogPath();
+    if (!gLogPath) return;
+    NSString *line = [NSString stringWithFormat:@"%@  %@\n",
+                      [NSDate date], msg];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+    if (fh) {
+        @try { [fh seekToEndOfFile]; [fh writeData:data]; } @catch (__unused id e) {}
+        [fh closeFile];
+    } else {
+        [data writeToFile:gLogPath atomically:NO];
+    }
+}
+
+// Returns whether this process should mix, latching the decision the first time
+// other audio is observed playing while this app touches its session.
+static BOOL PDSTMShouldMix(AVAudioSession *session) {
+    if (session.isOtherAudioPlaying && !gLatchedSecondary) {
+        gLatchedSecondary = YES;
+        PDSTMLog(@"latched as SECONDARY source -> forcing MixWithOthers from now on");
     }
     return gLatchedSecondary;
 }
@@ -60,16 +101,15 @@ static BOOL PDSTMShouldMix(AVAudioSession *session) {
 %hook AVAudioSession
 
 // Older convenience setter (category only). No options arg, so to add mixing we
-// have to route through the mode/options setter (also hooked).
+// route through the mode/options setter (also hooked).
 - (BOOL)setCategory:(NSString *)category error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setCategory:%@ (other=%d latched=%d)", PDSTMBundle(), category, self.isOtherAudioPlaying, gLatchedSecondary);
+    PDSTMLog(@"setCategory:%@  (otherPlaying=%d latched=%d)",
+             category, self.isOtherAudioPlaying, gLatchedSecondary);
     if (PDSTMShouldMix(self)) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            // SoloAmbient cannot mix; Ambient is the mixable equivalent.
             return %orig(AVAudioSessionCategoryAmbient, outError);
         }
-        if ([category isEqualToString:AVAudioSessionCategoryPlayback] ||
-            [category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        if ([category isEqualToString:AVAudioSessionCategoryPlayback]) {
             return [self setCategory:category
                                 mode:AVAudioSessionModeDefault
                              options:AVAudioSessionCategoryOptionMixWithOthers
@@ -80,7 +120,8 @@ static BOOL PDSTMShouldMix(AVAudioSession *session) {
 }
 
 - (BOOL)setCategory:(NSString *)category mode:(NSString *)mode options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setCategory:%@ mode:%@ options:%lu (other=%d latched=%d)", PDSTMBundle(), category, mode, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
+    PDSTMLog(@"setCategory:%@ mode:%@ options:%lu  (otherPlaying=%d latched=%d)",
+             category, mode, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
     if (PDSTMShouldMix(self)) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
@@ -92,7 +133,8 @@ static BOOL PDSTMShouldMix(AVAudioSession *session) {
 
 // Modern setter (iOS 11+). TikTok and most current apps use this one.
 - (BOOL)setCategory:(NSString *)category mode:(NSString *)mode routeSharingPolicy:(AVAudioSessionRouteSharingPolicy)policy options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setCategory:%@ mode:%@ policy:%ld options:%lu (other=%d latched=%d)", PDSTMBundle(), category, mode, (long)policy, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
+    PDSTMLog(@"setCategory:%@ mode:%@ policy:%ld options:%lu  (otherPlaying=%d latched=%d)",
+             category, mode, (long)policy, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
     if (PDSTMShouldMix(self)) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
@@ -103,7 +145,8 @@ static BOOL PDSTMShouldMix(AVAudioSession *session) {
 }
 
 - (BOOL)setCategory:(NSString *)category withOptions:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setCategory:%@ withOptions:%lu (other=%d latched=%d)", PDSTMBundle(), category, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
+    PDSTMLog(@"setCategory:%@ withOptions:%lu  (otherPlaying=%d latched=%d)",
+             category, (unsigned long)options, self.isOtherAudioPlaying, gLatchedSecondary);
     if (PDSTMShouldMix(self)) {
         if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
             category = AVAudioSessionCategoryAmbient;
@@ -113,23 +156,49 @@ static BOOL PDSTMShouldMix(AVAudioSession *session) {
     return %orig(category, options, outError);
 }
 
-// Log-only. We deliberately do NOT reconfigure the category here anymore: doing
-// so synchronously during a PiP activation froze the PiP window. The latched
-// setCategory:* hooks above already keep the session mixable.
+// Re-assert mixing at activation time. Many apps (TikTok included) configure
+// their category once and only call -setActive: later; this is the hook that
+// makes the common "music already playing -> open app -> it mixes" case work.
 - (BOOL)setActive:(BOOL)active error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setActive:%d (cat=%@ opts=%lu other=%d latched=%d)", PDSTMBundle(), active, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gLatchedSecondary);
-    PDSTMShouldMix(self); // keep the latch fresh if other audio is heard here
+    PDSTMLog(@"setActive:%d  (cat=%@ opts=%lu otherPlaying=%d latched=%d)",
+             active, self.category, (unsigned long)self.categoryOptions,
+             self.isOtherAudioPlaying, gLatchedSecondary);
+    if (active && PDSTMShouldMix(self)
+        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        NSString *cat = self.category;
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+            cat = AVAudioSessionCategoryAmbient;
+        }
+        PDSTMLog(@"  -> re-applying %@ with MixWithOthers before activating", cat);
+        [self setCategory:cat
+                     mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
+                    error:nil];
+    }
     return %orig;
 }
 
 - (BOOL)setActive:(BOOL)active withOptions:(AVAudioSessionSetActiveOptions)options error:(NSError **)outError {
-    NSLog(@"[PDSTM][%@] setActive:%d withOptions:%lu (cat=%@ opts=%lu other=%d latched=%d)", PDSTMBundle(), active, (unsigned long)options, self.category, (unsigned long)self.categoryOptions, self.isOtherAudioPlaying, gLatchedSecondary);
-    PDSTMShouldMix(self);
+    PDSTMLog(@"setActive:%d withOptions:%lu  (cat=%@ opts=%lu otherPlaying=%d latched=%d)",
+             active, (unsigned long)options, self.category, (unsigned long)self.categoryOptions,
+             self.isOtherAudioPlaying, gLatchedSecondary);
+    if (active && PDSTMShouldMix(self)
+        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        NSString *cat = self.category;
+        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+            cat = AVAudioSessionCategoryAmbient;
+        }
+        PDSTMLog(@"  -> re-applying %@ with MixWithOthers before activating", cat);
+        [self setCategory:cat
+                     mode:self.mode
+                  options:self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers
+                    error:nil];
+    }
     return %orig;
 }
 
 %end
 
 %ctor {
-    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD loaded in %@", PDSTMBundle());
+    NSLog(@"[PleaseDontStopTheMusic] TEST BUILD 2 loaded in %@", PDSTMBundle());
 }
